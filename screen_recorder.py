@@ -15,35 +15,112 @@ import sys
 import imageio
 
 class SelectionWindow(QWidget):
-    def __init__(self, screen):
+    def __init__(self, screen, width=None, height=None):
         super().__init__()
+        # Make sure dimensions are even numbers
+        if width is not None:
+            width = width + (width % 2)  # Make even if odd
+        if height is not None:
+            height = height + (height % 2)  # Make even if odd
+            
         self.screen = screen
         self.rubberband = QRubberBand(QRubberBand.Shape.Rectangle, self)
         self.origin = QPoint()
         self.selected_geometry = None
+        self.fixed_width = width
+        self.fixed_height = height
         
         # Set up full screen transparent window
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setStyleSheet("background-color: rgba(0, 0, 0, 50);")
         self.setGeometry(screen.geometry())
         
+        # If dimensions are provided, create initial selection in center
+        if width and height:
+            screen_center = self.geometry().center()
+            self.origin = QPoint(
+                screen_center.x() - width // 2,
+                screen_center.y() - height // 2
+            )
+            self.rubberband.setGeometry(
+                self.origin.x(),
+                self.origin.y(),
+                width,
+                height
+            )
+            self.rubberband.show()
+    
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.origin = event.pos()
-            self.rubberband.setGeometry(QRect(self.origin, QPoint()))
+            if self.fixed_width and self.fixed_height:
+                # Move the existing box
+                offset_x = self.fixed_width // 2
+                offset_y = self.fixed_height // 2
+                self.origin = QPoint(
+                    event.pos().x() - offset_x,
+                    event.pos().y() - offset_y
+                )
+                self.rubberband.setGeometry(
+                    self.origin.x(),
+                    self.origin.y(),
+                    self.fixed_width,
+                    self.fixed_height
+                )
+            else:
+                # Draw new box
+                self.origin = event.pos()
+                self.rubberband.setGeometry(QRect(self.origin, QPoint()))
             self.rubberband.show()
 
     def mouseMoveEvent(self, event):
         if self.rubberband.isVisible():
-            self.rubberband.setGeometry(QRect(self.origin, event.pos()).normalized())
+            if self.fixed_width and self.fixed_height:
+                # Move the fixed-size box
+                screen_rect = self.screen.geometry()
+                new_x = max(0, min(event.pos().x() - self.fixed_width // 2, 
+                                 screen_rect.width() - self.fixed_width))
+                new_y = max(0, min(event.pos().y() - self.fixed_height // 2, 
+                                 screen_rect.height() - self.fixed_height))
+                self.rubberband.setGeometry(
+                    new_x,
+                    new_y,
+                    self.fixed_width,
+                    self.fixed_height
+                )
+            else:
+                # Resize the free-form box
+                self.rubberband.setGeometry(QRect(self.origin, event.pos()).normalized())
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.selected_geometry = self.rubberband.geometry()
+            geometry = self.rubberband.geometry()
+            
+            # Ensure the region stays within screen bounds
+            screen_rect = self.screen.geometry()
+            x = max(0, min(geometry.x(), screen_rect.width() - 2))  # Ensure at least 2 pixels width
+            y = max(0, min(geometry.y(), screen_rect.height() - 2))  # Ensure at least 2 pixels height
+            width = min(screen_rect.width() - x, geometry.width())
+            height = min(screen_rect.height() - y, geometry.height())
+            
+            # Make dimensions even
+            width = width + (width % 2)  # Make even if odd
+            height = height + (height % 2)  # Make even if odd
+            
+            # Final bounds check
+            width = min(width, screen_rect.width() - x)
+            height = min(height, screen_rect.height() - y)
+            
+            # Ensure minimum dimensions
+            width = max(2, width)
+            height = max(2, height)
+            
+            self.selected_geometry = QRect(x, y, width, height)
+            print(f"Selected region (after adjustment): {width}x{height} at ({x},{y})")
             self.close()
 
 class ScreenRecorder:
-    def __init__(self, output_video="recording.mp4", output_mouse="mouse_positions.json", monitor_number=None):
+    def __init__(self, output_video="recording.mp4", output_mouse="mouse_positions.json", 
+                 monitor_number=None, fixed_width=None, fixed_height=None):
         self.output_video = output_video
         self.output_mouse = output_mouse
         self.recording = False
@@ -53,6 +130,8 @@ class ScreenRecorder:
         self.frames = []  # Store frames in memory
         self.mouse_listener = None  # Add this line
         self.recording_region = None  # Will store the selected region
+        self.fixed_width = fixed_width
+        self.fixed_height = fixed_height
         
         # Initialize Qt Application for screen capture
         self.app = QApplication(sys.argv)
@@ -101,7 +180,11 @@ class ScreenRecorder:
 
     def select_recording_region(self):
         """Let user select a region to record or choose full screen"""
-        selection_window = SelectionWindow(self.selected_screen)
+        selection_window = SelectionWindow(
+            self.selected_screen,
+            width=self.fixed_width,
+            height=self.fixed_height
+        )
         selection_window.show()
         self.app.exec()  # Wait for selection
         
@@ -594,6 +677,10 @@ def main():
                       help='Zoom factor for processing (default: 4.0)')
     parser.add_argument('--monitor', type=int, 
                       help='Monitor number to record (will list monitors if not specified)')
+    parser.add_argument('--width', type=int, help='Fixed width of recording region in pixels')
+    parser.add_argument('--height', type=int, help='Fixed height of recording region in pixels')
+    parser.add_argument('--fullscreen', action='store_true', 
+                      help='Record full screen without region selection')
     
     args = parser.parse_args()
     
@@ -604,7 +691,15 @@ def main():
         mouse_file = f"mouse_{timestamp}.json"
         
         # Record screen and mouse positions
-        recorder = ScreenRecorder(video_file, mouse_file, args.monitor)
+        recorder = ScreenRecorder(
+            video_file, 
+            mouse_file, 
+            args.monitor,
+            fixed_width=args.width,
+            fixed_height=args.height
+        )
+        if not args.fullscreen:
+            recorder.select_recording_region()
         recorder.start_recording()
         
         # Automatically process the recording if desired
