@@ -72,29 +72,18 @@ class ScreenRecorder:
         last_frame_time = time.time()
         target_frame_time = 1.0 / self.fps
         
-        # Create a simple cursor
-        cursor_size = int(20 * self.device_pixel_ratio)  # Scale cursor size
-        cursor = np.zeros((cursor_size, cursor_size, 4), dtype=np.uint8)
-        # White fill
-        cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(6 * self.device_pixel_ratio), (255, 255, 255, 255), -1)
-        # Black outline
-        cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(6 * self.device_pixel_ratio), (0, 0, 0, 255), 1)
-        # Add a black dot in the center
-        cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(1 * self.device_pixel_ratio), (0, 0, 0, 255), -1)
-        
         while self.recording:
             current_time = time.time()
             elapsed = current_time - last_frame_time
             
+            # Only capture frame if enough time has elapsed
             if elapsed >= target_frame_time:
-                # Get current mouse position using Qt
+                # Capture and process frame
                 mouse_pos = QCursor.pos()
-                
-                # Convert to screen-relative coordinates and apply device pixel ratio
                 screen_x = int((mouse_pos.x() - self.screen_geometry.x()) * self.device_pixel_ratio)
                 screen_y = int((mouse_pos.y() - self.screen_geometry.y()) * self.device_pixel_ratio)
                 
-                # Store raw screen coordinates
+                # Store raw screen coordinates with precise timing
                 if self.start_time is not None:
                     current_recording_time = time.time() - self.start_time
                     self.mouse_positions[f"{current_recording_time:.3f}"] = [screen_x, screen_y]
@@ -121,6 +110,15 @@ class ScreenRecorder:
                     image.height(), image.width(), 4).copy()
                 
                 # Draw cursor
+                cursor_size = int(20 * self.device_pixel_ratio)  # Scale cursor size
+                cursor = np.zeros((cursor_size, cursor_size, 4), dtype=np.uint8)
+                # White fill
+                cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(6 * self.device_pixel_ratio), (255, 255, 255, 255), -1)
+                # Black outline
+                cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(6 * self.device_pixel_ratio), (0, 0, 0, 255), 1)
+                # Add a black dot in the center
+                cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(1 * self.device_pixel_ratio), (0, 0, 0, 255), -1)
+                
                 cursor_h, cursor_w = cursor.shape[:2]
                 x1 = max(0, screen_x - cursor_w//2)
                 y1 = max(0, screen_y - cursor_h//2)
@@ -148,22 +146,28 @@ class ScreenRecorder:
                             frame[y1:y2, x1:x2, :3] = blended
                 
                 # Store frame with swapped channels for final video
-                final_frame = frame[:, :, [2, 1, 0]].copy()  # Swap R and B channels
+                final_frame = frame[:, :, [2, 1, 0]].copy()
                 self.frames.append(final_frame)
-                frame_count += 1
                 
-                # Show preview with original channels
+                # Show preview
                 preview = cv2.resize(frame[:, :, :3], None, fx=preview_scale, fy=preview_scale)
                 cv2.imshow('Recording Preview (Press "q" to stop)', preview)
                 
-                last_frame_time = current_time
+                # Update timing and count
+                frame_count += 1  # Only increment once
+                last_frame_time += target_frame_time  # Use fixed time steps
                 
+                # Debug timing info
                 if frame_count % 30 == 0:
-                    print(f"Recorded {frame_count} frames...")
-            
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                self.recording = False
-                break
+                    actual_fps = frame_count / (time.time() - self.start_time)
+                    print(f"Current FPS: {actual_fps:.1f}")
+                
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    self.recording = False
+                    break
+            else:
+                # Small sleep to prevent CPU spinning
+                time.sleep(0.001)
         
         return frame_count
 
@@ -192,24 +196,28 @@ class ScreenRecorder:
         print("Starting recording... Press 'q' in preview window to stop.")
         self.recording = True
         self.start_time = time.time()
-        self.frames = []  # Clear any existing frames
+        self.frames = []
         
-        # Remove pynput mouse listener - we'll use Qt's cursor position only
         frame_count = self.record_screen()
         self.stop_recording()
         
         if frame_count == 0:
             raise Exception("No frames were recorded!")
         
+        # Calculate actual duration and FPS
         print(f"Recording complete. Saving {frame_count} frames...")
+        actual_duration = time.time() - self.start_time
+        actual_fps = frame_count / actual_duration
+        print(f"Recorded {frame_count} frames in {actual_duration:.1f} seconds ({actual_fps:.1f} fps)")
         
         # Save video using imageio with correct FPS
         try:
             print("Saving video...")
+            # Use the actual FPS for saving
             imageio.mimsave(
                 self.output_video,
                 self.frames,
-                fps=self.fps,
+                fps=actual_fps,  # Use actual recorded FPS
                 quality=8,
                 macro_block_size=None
             )
