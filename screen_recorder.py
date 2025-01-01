@@ -37,6 +37,12 @@ class ScreenRecorder:
         
         # Video settings
         self.fps = 30.0
+        
+        # Store screen geometry and device pixel ratio for coordinate conversion
+        self.screen_geometry = self.selected_screen.geometry()
+        self.device_pixel_ratio = self.selected_screen.devicePixelRatio()
+        print(f"Screen geometry: {self.screen_geometry.width()}x{self.screen_geometry.height()}")
+        print(f"Device pixel ratio: {self.device_pixel_ratio}")
 
     def list_monitors(self):
         """List all available monitors"""
@@ -67,53 +73,66 @@ class ScreenRecorder:
         target_frame_time = 1.0 / self.fps
         
         # Create a simple cursor
-        cursor_size = 20
+        cursor_size = int(20 * self.device_pixel_ratio)  # Scale cursor size
         cursor = np.zeros((cursor_size, cursor_size, 4), dtype=np.uint8)
         # White fill
-        cv2.circle(cursor, (cursor_size//2, cursor_size//2), 6, (255, 255, 255, 255), -1)
+        cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(6 * self.device_pixel_ratio), (255, 255, 255, 255), -1)
         # Black outline
-        cv2.circle(cursor, (cursor_size//2, cursor_size//2), 6, (0, 0, 0, 255), 1)
+        cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(6 * self.device_pixel_ratio), (0, 0, 0, 255), 1)
         # Add a black dot in the center
-        cv2.circle(cursor, (cursor_size//2, cursor_size//2), 1, (0, 0, 0, 255), -1)
+        cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(1 * self.device_pixel_ratio), (0, 0, 0, 255), -1)
         
         while self.recording:
             current_time = time.time()
             elapsed = current_time - last_frame_time
             
             if elapsed >= target_frame_time:
-                # Get current mouse position
+                # Get current mouse position using Qt
                 mouse_pos = QCursor.pos()
-                screen_geometry = self.selected_screen.geometry()
-                mouse_x = mouse_pos.x() - screen_geometry.x()
-                mouse_y = mouse_pos.y() - screen_geometry.y()
+                
+                # Convert to screen-relative coordinates and apply device pixel ratio
+                screen_x = int((mouse_pos.x() - self.screen_geometry.x()) * self.device_pixel_ratio)
+                screen_y = int((mouse_pos.y() - self.screen_geometry.y()) * self.device_pixel_ratio)
+                
+                # Store raw screen coordinates
+                if self.start_time is not None:
+                    current_recording_time = time.time() - self.start_time
+                    self.mouse_positions[f"{current_recording_time:.3f}"] = [screen_x, screen_y]
+                
+                # Debug print mouse position occasionally
+                if frame_count % 30 == 0:
+                    print(f"Screen geometry: {self.screen_geometry.width()}x{self.screen_geometry.height()}")
+                    print(f"Mouse raw: ({mouse_pos.x()}, {mouse_pos.y()})")
+                    print(f"Mouse screen-relative: ({screen_x}, {screen_y})")
+                    print(f"Device pixel ratio: {self.device_pixel_ratio}")
                 
                 # Capture screen
                 pixmap = self.selected_screen.grabWindow(0,
-                                                       screen_geometry.x(),
-                                                       screen_geometry.y(),
-                                                       screen_geometry.width(),
-                                                       screen_geometry.height())
+                                                       self.screen_geometry.x(),
+                                                       self.screen_geometry.y(),
+                                                       self.screen_geometry.width(),
+                                                       self.screen_geometry.height())
                 
                 # Convert to numpy array
                 image = pixmap.toImage()
                 buffer = image.constBits()
                 buffer.setsize(image.sizeInBytes())
                 frame = np.frombuffer(buffer, dtype=np.uint8).reshape(
-                    image.height(), image.width(), 4).copy()  # Make a copy here
+                    image.height(), image.width(), 4).copy()
                 
                 # Draw cursor on frame
                 cursor_h, cursor_w = cursor.shape[:2]
-                x1 = max(0, mouse_x - cursor_w//2)
-                y1 = max(0, mouse_y - cursor_h//2)
+                x1 = max(0, screen_x - cursor_w//2)
+                y1 = max(0, screen_y - cursor_h//2)
                 x2 = min(frame.shape[1], x1 + cursor_w)
                 y2 = min(frame.shape[0], y1 + cursor_h)
                 
                 if x2 > x1 and y2 > y1:
                     # Calculate the visible portion of the cursor
-                    cursor_x1 = 0 if x1 >= 0 else -x1
-                    cursor_y1 = 0 if y1 >= 0 else -y1
-                    cursor_x2 = cursor_w - (cursor_w - (x2 - x1))
-                    cursor_y2 = cursor_h - (cursor_h - (y2 - y1))
+                    cursor_x1 = int(0 if x1 >= 0 else -x1)
+                    cursor_y1 = int(0 if y1 >= 0 else -y1)
+                    cursor_x2 = int(cursor_w - (cursor_w - (x2 - x1)))
+                    cursor_y2 = int(cursor_h - (cursor_h - (y2 - y1)))
                     
                     if cursor_x2 > cursor_x1 and cursor_y2 > cursor_y1:
                         # Get the alpha channel for blending
@@ -177,11 +196,7 @@ class ScreenRecorder:
         self.start_time = time.time()
         self.frames = []  # Clear any existing frames
         
-        # Start mouse listener
-        mouse_listener = mouse.Listener(on_move=self.on_move)
-        mouse_listener.start()
-        
-        # Start screen recording
+        # Remove pynput mouse listener - we'll use Qt's cursor position only
         frame_count = self.record_screen()
         self.stop_recording()
         
@@ -196,7 +211,7 @@ class ScreenRecorder:
             imageio.mimsave(
                 self.output_video,
                 self.frames,
-                fps=self.fps,  # Ensure correct playback speed
+                fps=self.fps,
                 quality=8,
                 macro_block_size=None
             )
