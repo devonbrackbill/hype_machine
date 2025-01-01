@@ -20,8 +20,10 @@ class ScreenRecorder:
         self.output_mouse = output_mouse
         self.recording = False
         self.mouse_positions = {}
+        self.click_events = {}
         self.start_time = None
         self.frames = []  # Store frames in memory
+        self.mouse_listener = None  # Add this line
         
         # Initialize Qt Application for screen capture
         self.app = QApplication(sys.argv)
@@ -80,13 +82,20 @@ class ScreenRecorder:
             if elapsed >= target_frame_time:
                 # Capture and process frame
                 mouse_pos = QCursor.pos()
-                screen_x = int((mouse_pos.x() - self.screen_geometry.x()) * self.device_pixel_ratio)
-                screen_y = int((mouse_pos.y() - self.screen_geometry.y()) * self.device_pixel_ratio)
+                # Fix coordinate conversion
+                screen_x = max(0, int((mouse_pos.x() - self.screen_geometry.x()) * self.device_pixel_ratio))
+                screen_y = max(0, int((mouse_pos.y() - self.screen_geometry.y()) * self.device_pixel_ratio))
                 
                 # Store raw screen coordinates with precise timing
                 if self.start_time is not None:
                     current_recording_time = time.time() - self.start_time
                     self.mouse_positions[f"{current_recording_time:.3f}"] = [screen_x, screen_y]
+                    
+                    # Store click events separately and debug print
+                    modifiers = QApplication.mouseButtons()
+                    if modifiers & Qt.MouseButton.LeftButton:
+                        self.click_events[f"{current_recording_time:.3f}"] = [screen_x, screen_y]
+                        print(f"Click detected at ({screen_x}, {screen_y})")
                 
                 # Debug print mouse position occasionally
                 if frame_count % 30 == 0:
@@ -191,12 +200,31 @@ class ScreenRecorder:
                 print(f"Mouse pos: Global({x}, {y}) -> Screen({screen_x}, {screen_y})")
                 print(f"Screen bounds: {screen_geometry.width()}x{screen_geometry.height()}")
     
+    def on_click(self, x, y, button, pressed):
+        """Callback for mouse clicks"""
+        if self.recording and self.start_time is not None and pressed and button == mouse.Button.left:
+            current_time = time.time() - self.start_time
+            
+            # Convert global coordinates to screen-relative coordinates
+            screen_x = max(0, int((x - self.screen_geometry.x()) * self.device_pixel_ratio))
+            screen_y = max(0, int((y - self.screen_geometry.y()) * self.device_pixel_ratio))
+            
+            # Store the click event
+            self.click_events[f"{current_time:.3f}"] = [screen_x, screen_y]
+            print(f"Click detected at ({screen_x}, {screen_y})")
+
     def start_recording(self):
         """Start recording screen and mouse positions"""
         print("Starting recording... Press 'q' in preview window to stop.")
         self.recording = True
         self.start_time = time.time()
         self.frames = []
+        self.mouse_positions = {}
+        self.click_events = {}
+        
+        # Start mouse listener
+        self.mouse_listener = mouse.Listener(on_click=self.on_click)
+        self.mouse_listener.start()
         
         frame_count = self.record_screen()
         self.stop_recording()
@@ -217,16 +245,20 @@ class ScreenRecorder:
             imageio.mimsave(
                 self.output_video,
                 self.frames,
-                fps=actual_fps,  # Use actual recorded FPS
+                fps=actual_fps,
                 quality=8,
                 macro_block_size=None
             )
             print("Video saved successfully!")
             
-            # Save mouse positions
+            # Save mouse positions and click events separately
+            data = {
+                'positions': self.mouse_positions,
+                'clicks': self.click_events
+            }
             with open(self.output_mouse, 'w') as f:
-                json.dump(self.mouse_positions, f)
-            print(f"Mouse positions saved to {self.output_mouse}")
+                json.dump(data, f)
+            print(f"Mouse data saved to {self.output_mouse}")
             
         except Exception as e:
             print(f"Error saving video: {str(e)}")
@@ -238,112 +270,63 @@ class ScreenRecorder:
                 print("Saved as GIF successfully!")
             except Exception as e2:
                 print(f"Error saving backup GIF: {str(e2)}")
-
     def stop_recording(self):
         """Stop recording and save data"""
         self.recording = False
+        if self.mouse_listener:
+            self.mouse_listener.stop()
         cv2.destroyAllWindows()
         
-        with open(self.output_mouse, 'w') as f:
-            json.dump(self.mouse_positions, f)
+        # Save both mouse positions and click events
+        data = {
+            'positions': self.mouse_positions,
+            'clicks': self.click_events
+        }
         
-        print(f"Mouse positions saved to {self.output_mouse}")
+        with open(self.output_mouse, 'w') as f:
+            json.dump(data, f)
+        
+        print(f"Mouse positions and click events saved to {self.output_mouse}")
 
-def create_zoom_effect(frame, current_time, mouse_positions, zoom_factor=2.0, 
-                      region_size=200, dwell_time=0.5, region_memory=1.0):
-    """
-    Create zoom effect based on mouse dwell time in regions
-    
-    Args:
-        frame: The video frame
-        current_time: Current video time
-        mouse_positions: Dictionary of mouse positions
-        zoom_factor: How much to zoom in
-        region_size: Size of the region in pixels to consider as "same area"
-        dwell_time: How long mouse must stay in region to trigger zoom (seconds)
-        region_memory: How long to remember previous positions (seconds)
-    """
+def create_zoom_effect(frame, current_time, mouse_positions, click_events, zoom_factor=2.0, 
+                      zoom_window=1.0):  # Time window around click (seconds)
+    """Create zoom effect based on click events"""
     h, w = frame.shape[:2]
     
-    # Debug print
-    if not hasattr(create_zoom_effect, 'debug_counter'):
-        create_zoom_effect.debug_counter = 0
-    create_zoom_effect.debug_counter += 1
-    
-    if create_zoom_effect.debug_counter % 30 == 0:  # Print every 30 frames
-        print(f"\nDebug info at time {current_time:.2f}:")
-        print(f"Mouse positions available: {len(mouse_positions)} entries")
-        print(f"Current region points: {len(current_region_points) if 'current_region_points' in locals() else 0}")
-        if hasattr(create_zoom_effect, 'current_zoom'):
-            print(f"Current zoom: {create_zoom_effect.current_zoom:.2f}")
-            print(f"Target zoom: {create_zoom_effect.target_zoom if hasattr(create_zoom_effect, 'target_zoom') else 1.0}")
-        if hasattr(create_zoom_effect, 'zoom_center'):
-            print(f"Zoom center: {create_zoom_effect.zoom_center}")
-    
-    # Static variables for tracking regions
-    if not hasattr(create_zoom_effect, 'region_history'):
-        create_zoom_effect.region_history = []  # List of (time, x, y) tuples
+    # Initialize static variables
+    if not hasattr(create_zoom_effect, 'current_zoom'):
         create_zoom_effect.current_zoom = 1.0
-        create_zoom_effect.target_zoom = 1.0
         create_zoom_effect.zoom_center = None
     
-    # Debug print to see what's happening
-    print(f"Time: {current_time}, Available times: {list(mouse_positions.keys())[:5]}...")
-    # Find closest mouse position in time
-    closest_time = min(mouse_positions.keys(),
-                      key=lambda t: abs(float(t) - float(current_time)),
-                      default=None)
-    
-    if closest_time is None:
-        print(f"No mouse position found for time {current_time}")
+    # Find nearest click event
+    click_times = [float(t) for t in click_events.keys()]
+    if not click_times:
         return frame
     
-    # Get current mouse position
-    x, y = mouse_positions[closest_time]
-    x, y = int(x), int(y)
+    # Find the closest click event
+    closest_click = min(click_times, key=lambda t: abs(t - current_time))
+    time_to_click = abs(current_time - closest_click)
     
-    # Update region history
-    create_zoom_effect.region_history.append((float(current_time), x, y))
-    
-    # Remove old positions outside the memory window
-    create_zoom_effect.region_history = [
-        (t, px, py) for t, px, py in create_zoom_effect.region_history
-        if current_time - t <= region_memory
-    ]
-    
-    # Check if we've been in the same region
-    current_region_points = []
-    for t, px, py in create_zoom_effect.region_history:
-        if (abs(px - x) <= region_size/2 and 
-            abs(py - y) <= region_size/2):
-            current_region_points.append((t, px, py))
-    
-    # Calculate time spent in current region
-    if current_region_points:
-        time_in_region = current_time - min(t for t, _, _ in current_region_points)
-        if time_in_region >= dwell_time:
-            # Calculate center of region
-            avg_x = sum(px for _, px, _ in current_region_points) / len(current_region_points)
-            avg_y = sum(py for _, _, py in current_region_points) / len(current_region_points)
-            create_zoom_effect.target_zoom = zoom_factor
-            create_zoom_effect.zoom_center = (int(avg_x), int(avg_y))
-        else:
-            create_zoom_effect.target_zoom = 1.0
+    # Calculate zoom based on proximity to click
+    if time_to_click <= zoom_window:
+        # Get click position
+        x, y = click_events[f"{closest_click:.3f}"]
+        
+        # Calculate zoom level (peak at click time)
+        zoom_progress = 1.0 - (time_to_click / zoom_window)
+        target_zoom = 1.0 + (zoom_factor - 1.0) * zoom_progress
+        
+        # Smooth zoom transition
+        zoom_smoothing = 0.90
+        create_zoom_effect.current_zoom = (zoom_smoothing * create_zoom_effect.current_zoom + 
+                                         (1 - zoom_smoothing) * target_zoom)
+        create_zoom_effect.zoom_center = (int(x), int(y))
     else:
-        create_zoom_effect.target_zoom = 1.0
+        # Smoothly return to no zoom
+        create_zoom_effect.current_zoom = max(1.0, create_zoom_effect.current_zoom * 0.95)
     
-    # Smooth zoom transition
-    zoom_smoothing = 0.90  # Higher = smoother transition
-    create_zoom_effect.current_zoom = (zoom_smoothing * create_zoom_effect.current_zoom + 
-                                     (1 - zoom_smoothing) * create_zoom_effect.target_zoom)
-    
-    # If no zoom needed, return original frame
-    if abs(create_zoom_effect.current_zoom - 1.0) < 0.01:
-        create_zoom_effect.zoom_center = None
-        return frame
-    
-    # Calculate zoom window
-    if create_zoom_effect.zoom_center:
+    # Apply zoom if needed
+    if create_zoom_effect.current_zoom > 1.01 and create_zoom_effect.zoom_center:
         center_x, center_y = create_zoom_effect.zoom_center
         window_w = w / create_zoom_effect.current_zoom
         window_h = h / create_zoom_effect.current_zoom
@@ -367,9 +350,7 @@ def create_zoom_effect(frame, current_time, mouse_positions, zoom_factor=2.0,
     return frame
 
 def process_video(input_video, mouse_data, output_video=None, zoom_factor=2.0,
-                 region_size=200,     # Keep this the same
-                 dwell_time=1.5,      # Increased from 0.5 to 1.5 seconds
-                 region_memory=2.0):   # Increased from 1.0 to 2.0 seconds
+                 zoom_window=1.0):  # Time window around click (seconds)
     """Add zoom effect to video"""
     if output_video is None:
         output_video = os.path.splitext(input_video)[0] + '_zoomed.mp4'
@@ -378,7 +359,9 @@ def process_video(input_video, mouse_data, output_video=None, zoom_factor=2.0,
     
     # Load mouse data
     with open(mouse_data, 'r') as f:
-        mouse_positions = json.load(f)
+        data = json.load(f)
+        mouse_positions = data.get('positions', {})
+        click_events = data.get('clicks', {})
     
     try:
         # Open the input video
@@ -419,7 +402,9 @@ def process_video(input_video, mouse_data, output_video=None, zoom_factor=2.0,
                 frame,
                 current_time,
                 mouse_positions,
-                zoom_factor=zoom_factor
+                click_events,
+                zoom_factor=zoom_factor,
+                zoom_window=zoom_window
             )
             
             # Write frame
@@ -494,9 +479,7 @@ def main():
             process_video(video_file, mouse_file, 
                          output_video=os.path.splitext(video_file)[0] + '_zoomed.mp4',
                          zoom_factor=args.zoom,
-                         region_size=200,
-                         dwell_time=1.5,      # Increased to 1.5 seconds
-                         region_memory=2.0)    # Increased to 2.0 seconds
+                         zoom_window=1.0)  # 1 second window around each click
     
     elif args.action == 'process':
         if not args.input or not args.mouse_data:
