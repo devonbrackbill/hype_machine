@@ -66,13 +66,15 @@ class ScreenRecorder:
         last_frame_time = time.time()
         target_frame_time = 1.0 / self.fps
         
-        # Load cursor image
-        cursor = cv2.imread('cursor.png', cv2.IMREAD_UNCHANGED)  # Assuming you have a cursor.png
-        if cursor is None:
-            # Create a simple cursor if image not found
-            cursor = np.zeros((20, 20, 4), dtype=np.uint8)
-            cv2.circle(cursor, (10, 10), 5, (255, 255, 255, 255), -1)
-            cv2.circle(cursor, (10, 10), 4, (0, 0, 0, 255), 1)
+        # Create a simple cursor
+        cursor_size = 20
+        cursor = np.zeros((cursor_size, cursor_size, 4), dtype=np.uint8)
+        # White fill
+        cv2.circle(cursor, (cursor_size//2, cursor_size//2), 6, (255, 255, 255, 255), -1)
+        # Black outline
+        cv2.circle(cursor, (cursor_size//2, cursor_size//2), 6, (0, 0, 0, 255), 1)
+        # Add a black dot in the center
+        cv2.circle(cursor, (cursor_size//2, cursor_size//2), 1, (0, 0, 0, 255), -1)
         
         while self.recording:
             current_time = time.time()
@@ -97,7 +99,7 @@ class ScreenRecorder:
                 buffer = image.constBits()
                 buffer.setsize(image.sizeInBytes())
                 frame = np.frombuffer(buffer, dtype=np.uint8).reshape(
-                    image.height(), image.width(), 4)
+                    image.height(), image.width(), 4).copy()  # Make a copy here
                 
                 # Draw cursor on frame
                 cursor_h, cursor_w = cursor.shape[:2]
@@ -107,9 +109,24 @@ class ScreenRecorder:
                 y2 = min(frame.shape[0], y1 + cursor_h)
                 
                 if x2 > x1 and y2 > y1:
-                    cursor_region = cursor[:y2-y1, :x2-x1]
-                    alpha = cursor_region[:, :, 3:] / 255.0
-                    frame[y1:y2, x1:x2] = frame[y1:y2, x1:x2] * (1 - alpha) + cursor_region[:, :, :3] * alpha
+                    # Calculate the visible portion of the cursor
+                    cursor_x1 = 0 if x1 >= 0 else -x1
+                    cursor_y1 = 0 if y1 >= 0 else -y1
+                    cursor_x2 = cursor_w - (cursor_w - (x2 - x1))
+                    cursor_y2 = cursor_h - (cursor_h - (y2 - y1))
+                    
+                    if cursor_x2 > cursor_x1 and cursor_y2 > cursor_y1:
+                        # Get the alpha channel for blending
+                        alpha = cursor[cursor_y1:cursor_y2, cursor_x1:cursor_x2, 3:] / 255.0
+                        # Get the cursor RGB values
+                        cursor_rgb = cursor[cursor_y1:cursor_y2, cursor_x1:cursor_x2, :3]
+                        
+                        # Ensure shapes match
+                        frame_region = frame[y1:y2, x1:x2, :3]
+                        if frame_region.shape == cursor_rgb.shape:
+                            # Blend cursor with frame
+                            blended = frame_region * (1 - alpha) + cursor_rgb * alpha
+                            frame[y1:y2, x1:x2, :3] = blended
                 
                 # Convert RGBA to RGB
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
@@ -137,7 +154,21 @@ class ScreenRecorder:
         """Callback for mouse movement"""
         if self.recording and self.start_time is not None:
             current_time = time.time() - self.start_time
-            self.mouse_positions[f"{current_time:.3f}"] = [x, y]
+            
+            # Get screen geometry
+            screen_geometry = self.selected_screen.geometry()
+            
+            # Convert global coordinates to screen-relative coordinates
+            screen_x = x - screen_geometry.x()
+            screen_y = y - screen_geometry.y()
+            
+            # Store the screen-relative coordinates
+            self.mouse_positions[f"{current_time:.3f}"] = [screen_x, screen_y]
+            
+            # Debug print to verify coordinates
+            if len(self.mouse_positions) % 30 == 0:  # Print every 30th position
+                print(f"Mouse pos: Global({x}, {y}) -> Screen({screen_x}, {screen_y})")
+                print(f"Screen bounds: {screen_geometry.width()}x{screen_geometry.height()}")
     
     def start_recording(self):
         """Start recording screen and mouse positions"""
