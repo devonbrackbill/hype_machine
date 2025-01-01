@@ -293,7 +293,7 @@ class ScreenRecorder:
         print(f"Mouse positions and click events saved to {self.output_mouse}")
 
 def create_zoom_effect(frame, current_time, mouse_positions, click_events, zoom_factor=2.0, 
-                      zoom_window=1.0, pre_click_ratio=0.15):  # 15% of window before click
+                      zoom_window=1.0, pre_click_ratio=0.15):
     """Create zoom effect based on click events"""
     h, w = frame.shape[:2]
     
@@ -308,33 +308,51 @@ def create_zoom_effect(frame, current_time, mouse_positions, click_events, zoom_
     if not click_times:
         return frame
     
-    # Find the closest click event
-    closest_click = min(click_times, key=lambda t: abs(t - current_time))
+    # Find the closest click event that's not too far in the future
+    valid_clicks = [t for t in click_times if (current_time - t) > -0.1]  # Small lookahead
+    if not valid_clicks:
+        return frame
+    closest_click = max(valid_clicks)  # Use the most recent valid click
     time_to_click = current_time - closest_click
     
+    # Get click position
+    x, y = click_events[f"{closest_click:.3f}"]
+    
+    # Check if new click is within current zoom region (with larger tolerance)
+    if create_zoom_effect.zoom_center and create_zoom_effect.current_zoom > 1.1:
+        old_x, old_y = create_zoom_effect.zoom_center
+        zoom_radius_x = (w / create_zoom_effect.current_zoom) * 0.75  # Increased radius
+        zoom_radius_y = (h / create_zoom_effect.current_zoom) * 0.75  # Increased radius
+        within_zoom = (abs(x - old_x) < zoom_radius_x and 
+                      abs(y - old_y) < zoom_radius_y)
+    else:
+        within_zoom = False
+    
     # Calculate zoom based on proximity to click
-    # Adjust timing so click happens after 15% of the window
     adjusted_time = time_to_click + (zoom_window * pre_click_ratio)
     
-    if 0 <= adjusted_time <= zoom_window * 2.0:  # Doubled the zoom window duration
-        # Get click position
-        x, y = click_events[f"{closest_click:.3f}"]
+    if 0 <= adjusted_time <= zoom_window * 2.0:
+        if within_zoom:
+            # Just pan to new location, maintaining zoom level
+            pan_smoothing = 0.85
+            new_x = int(pan_smoothing * old_x + (1 - pan_smoothing) * x)
+            new_y = int(pan_smoothing * old_y + (1 - pan_smoothing) * y)
+            create_zoom_effect.zoom_center = (new_x, new_y)
+        else:
+            # Regular zoom behavior
+            if adjusted_time < zoom_window * 0.3:
+                zoom_progress = 1.0 - (adjusted_time / (zoom_window * 0.3))
+            elif adjusted_time < zoom_window * 1.7:
+                zoom_progress = 1.0
+            else:
+                zoom_progress = (zoom_window * 2.0 - adjusted_time) / (zoom_window * 0.3)
+            
+            target_zoom = 1.0 + (zoom_factor - 1.0) * max(0, min(1, zoom_progress))
+            zoom_smoothing = 0.85 if zoom_progress > create_zoom_effect.current_zoom else 0.90
+            create_zoom_effect.current_zoom = (zoom_smoothing * create_zoom_effect.current_zoom + 
+                                             (1 - zoom_smoothing) * target_zoom)
+            create_zoom_effect.zoom_center = (int(x), int(y))
         
-        # Calculate zoom level with longer hold at max zoom
-        if adjusted_time < zoom_window * 0.3:  # Zoom in phase (30% of window)
-            zoom_progress = 1.0 - (adjusted_time / (zoom_window * 0.3))
-        elif adjusted_time < zoom_window * 1.7:  # Hold phase (140% of window)
-            zoom_progress = 1.0
-        else:  # Zoom out phase (remaining 30% of window)
-            zoom_progress = (zoom_window * 2.0 - adjusted_time) / (zoom_window * 0.3)
-        
-        target_zoom = 1.0 + (zoom_factor - 1.0) * max(0, min(1, zoom_progress))
-        
-        # Quick zoom in, slower zoom out
-        zoom_smoothing = 0.85 if zoom_progress > create_zoom_effect.current_zoom else 0.90
-        create_zoom_effect.current_zoom = (zoom_smoothing * create_zoom_effect.current_zoom + 
-                                         (1 - zoom_smoothing) * target_zoom)
-        create_zoom_effect.zoom_center = (int(x), int(y))
         create_zoom_effect.last_click_time = closest_click
     else:
         # Quick return to no zoom
