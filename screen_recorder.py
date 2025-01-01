@@ -203,15 +203,19 @@ class ScreenRecorder:
     def on_click(self, x, y, button, pressed):
         """Callback for mouse clicks"""
         if self.recording and self.start_time is not None and pressed and button == mouse.Button.left:
-            current_time = time.time() - self.start_time
-            
             # Convert global coordinates to screen-relative coordinates
-            screen_x = max(0, int((x - self.screen_geometry.x()) * self.device_pixel_ratio))
-            screen_y = max(0, int((y - self.screen_geometry.y()) * self.device_pixel_ratio))
+            screen_x = int((x - self.screen_geometry.x()) * self.device_pixel_ratio)
+            screen_y = int((y - self.screen_geometry.y()) * self.device_pixel_ratio)
             
-            # Store the click event
-            self.click_events[f"{current_time:.3f}"] = [screen_x, screen_y]
-            print(f"Click detected at ({screen_x}, {screen_y})")
+            # Check if click is within screen bounds
+            if (0 <= screen_x < self.screen_geometry.width() * self.device_pixel_ratio and 
+                0 <= screen_y < self.screen_geometry.height() * self.device_pixel_ratio):
+                
+                current_time = time.time() - self.start_time
+                self.click_events[f"{current_time:.3f}"] = [screen_x, screen_y]
+                print(f"Click detected at ({screen_x}, {screen_y})")
+            else:
+                print(f"Ignoring off-screen click at ({screen_x}, {screen_y})")
 
     def start_recording(self):
         """Start recording screen and mouse positions"""
@@ -316,14 +320,14 @@ def create_zoom_effect(frame, current_time, mouse_positions, click_events, zoom_
         zoom_progress = 1.0 - (time_to_click / zoom_window)
         target_zoom = 1.0 + (zoom_factor - 1.0) * zoom_progress
         
-        # Smooth zoom transition
-        zoom_smoothing = 0.90
+        # Increase smoothing factor (was 0.90)
+        zoom_smoothing = 0.95  # Higher value = smoother, more stable zoom
         create_zoom_effect.current_zoom = (zoom_smoothing * create_zoom_effect.current_zoom + 
                                          (1 - zoom_smoothing) * target_zoom)
         create_zoom_effect.zoom_center = (int(x), int(y))
     else:
-        # Smoothly return to no zoom
-        create_zoom_effect.current_zoom = max(1.0, create_zoom_effect.current_zoom * 0.95)
+        # Slower return to no zoom (was 0.95)
+        create_zoom_effect.current_zoom = max(1.0, create_zoom_effect.current_zoom * 0.98)
     
     # Apply zoom if needed
     if create_zoom_effect.current_zoom > 1.01 and create_zoom_effect.zoom_center:
