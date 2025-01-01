@@ -8,11 +8,39 @@ from datetime import datetime
 import argparse
 import os
 from moviepy import VideoFileClip
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QRubberBand, QWidget
+from PyQt6.QtCore import Qt, QRect, QPoint
 from PyQt6.QtGui import QScreen, QCursor
 import sys
 import imageio
+
+class SelectionWindow(QWidget):
+    def __init__(self, screen):
+        super().__init__()
+        self.screen = screen
+        self.rubberband = QRubberBand(QRubberBand.Shape.Rectangle, self)
+        self.origin = QPoint()
+        self.selected_geometry = None
+        
+        # Set up full screen transparent window
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setStyleSheet("background-color: rgba(0, 0, 0, 50);")
+        self.setGeometry(screen.geometry())
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.origin = event.pos()
+            self.rubberband.setGeometry(QRect(self.origin, QPoint()))
+            self.rubberband.show()
+
+    def mouseMoveEvent(self, event):
+        if self.rubberband.isVisible():
+            self.rubberband.setGeometry(QRect(self.origin, event.pos()).normalized())
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.selected_geometry = self.rubberband.geometry()
+            self.close()
 
 class ScreenRecorder:
     def __init__(self, output_video="recording.mp4", output_mouse="mouse_positions.json", monitor_number=None):
@@ -24,6 +52,7 @@ class ScreenRecorder:
         self.start_time = None
         self.frames = []  # Store frames in memory
         self.mouse_listener = None  # Add this line
+        self.recording_region = None  # Will store the selected region
         
         # Initialize Qt Application for screen capture
         self.app = QApplication(sys.argv)
@@ -45,6 +74,9 @@ class ScreenRecorder:
         self.device_pixel_ratio = self.selected_screen.devicePixelRatio()
         print(f"Screen geometry: {self.screen_geometry.width()}x{self.screen_geometry.height()}")
         print(f"Device pixel ratio: {self.device_pixel_ratio}")
+        
+        self.scale_factor = self.selected_screen.devicePixelRatio()
+        print(f"Screen scale factor: {self.scale_factor}")
 
     def list_monitors(self):
         """List all available monitors"""
@@ -67,6 +99,42 @@ class ScreenRecorder:
             except ValueError:
                 print("Please enter a valid number.")
 
+    def select_recording_region(self):
+        """Let user select a region to record or choose full screen"""
+        selection_window = SelectionWindow(self.selected_screen)
+        selection_window.show()
+        self.app.exec()  # Wait for selection
+        
+        if selection_window.selected_geometry:
+            # Convert to screen coordinates
+            region = selection_window.selected_geometry
+            self.recording_region = QRect(
+                region.x() + self.screen_geometry.x(),
+                region.y() + self.screen_geometry.y(),
+                region.width(),
+                region.height()
+            )
+            print(f"Selected region: {self.recording_region.width()}x{self.recording_region.height()}")
+        else:
+            # Use full screen if no selection was made
+            self.recording_region = self.screen_geometry
+            print("Using full screen recording")
+
+    def get_mouse_position(self):
+        """Get current mouse position relative to recording region"""
+        cursor = QCursor.pos()
+        if self.recording_region:
+            # Adjust coordinates relative to the recording region
+            relative_x = (cursor.x() - self.recording_region.x()) * self.scale_factor
+            relative_y = (cursor.y() - self.recording_region.y()) * self.scale_factor
+            
+            # Ensure coordinates are within bounds
+            relative_x = max(0, min(relative_x, self.recording_region.width() * self.scale_factor))
+            relative_y = max(0, min(relative_y, self.recording_region.height() * self.scale_factor))
+            
+            return relative_x, relative_y
+        return cursor.x() * self.scale_factor, cursor.y() * self.scale_factor
+
     def record_screen(self):
         """Record the screen"""
         preview_scale = 0.5  # Scale down preview
@@ -82,34 +150,56 @@ class ScreenRecorder:
             if elapsed >= target_frame_time:
                 # Capture and process frame
                 mouse_pos = QCursor.pos()
-                # Fix coordinate conversion
-                screen_x = max(0, int((mouse_pos.x() - self.screen_geometry.x()) * self.device_pixel_ratio))
-                screen_y = max(0, int((mouse_pos.y() - self.screen_geometry.y()) * self.device_pixel_ratio))
+                if self.recording_region:
+                    # Calculate cursor position relative to recording region
+                    cursor_x = int((mouse_pos.x() - self.recording_region.x()) * self.scale_factor)
+                    cursor_y = int((mouse_pos.y() - self.recording_region.y()) * self.scale_factor)
+                    
+                    # Ensure cursor stays within bounds
+                    cursor_x = max(0, min(cursor_x, self.recording_region.width() * self.scale_factor))
+                    cursor_y = max(0, min(cursor_y, self.recording_region.height() * self.scale_factor))
+                else:
+                    cursor_x = int((mouse_pos.x() - self.screen_geometry.x()) * self.scale_factor)
+                    cursor_y = int((mouse_pos.y() - self.screen_geometry.y()) * self.scale_factor)
                 
                 # Store raw screen coordinates with precise timing
                 if self.start_time is not None:
                     current_recording_time = time.time() - self.start_time
-                    self.mouse_positions[f"{current_recording_time:.3f}"] = [screen_x, screen_y]
+                    self.mouse_positions[f"{current_recording_time:.3f}"] = [cursor_x, cursor_y]
                     
                     # Store click events separately and debug print
                     modifiers = QApplication.mouseButtons()
                     if modifiers & Qt.MouseButton.LeftButton:
-                        self.click_events[f"{current_recording_time:.3f}"] = [screen_x, screen_y]
-                        print(f"Click detected at ({screen_x}, {screen_y})")
+                        self.click_events[f"{current_recording_time:.3f}"] = [cursor_x, cursor_y]
+                        print(f"Click detected at ({cursor_x}, {cursor_y})")
                 
                 # Debug print mouse position occasionally
                 if frame_count % 30 == 0:
                     print(f"Screen geometry: {self.screen_geometry.width()}x{self.screen_geometry.height()}")
                     print(f"Mouse raw: ({mouse_pos.x()}, {mouse_pos.y()})")
-                    print(f"Mouse screen-relative: ({screen_x}, {screen_y})")
+                    print(f"Mouse screen-relative: ({cursor_x}, {cursor_y})")
                     print(f"Device pixel ratio: {self.device_pixel_ratio}")
                 
-                # Capture screen
-                pixmap = self.selected_screen.grabWindow(0,
-                                                       self.screen_geometry.x(),
-                                                       self.screen_geometry.y(),
-                                                       self.screen_geometry.width(),
-                                                       self.screen_geometry.height())
+                # Modify the screen capture to use the selected region
+                if self.recording_region:
+                    scaled_width = int(self.recording_region.width() * self.scale_factor)
+                    scaled_height = int(self.recording_region.height() * self.scale_factor)
+                    pixmap = self.selected_screen.grabWindow(
+                        0,
+                        self.recording_region.x(),
+                        self.recording_region.y(),
+                        self.recording_region.width(),
+                        self.recording_region.height()
+                    )
+                    # Scale the captured image to account for Retina display
+                    if self.scale_factor != 1:
+                        pixmap = pixmap.scaled(scaled_width, scaled_height)
+                else:
+                    pixmap = self.selected_screen.grabWindow(0,
+                                                           self.screen_geometry.x(),
+                                                           self.screen_geometry.y(),
+                                                           self.screen_geometry.width(),
+                                                           self.screen_geometry.height())
                 
                 # Convert to numpy array
                 image = pixmap.toImage()
@@ -118,36 +208,41 @@ class ScreenRecorder:
                 frame = np.frombuffer(buffer, dtype=np.uint8).reshape(
                     image.height(), image.width(), 4).copy()
                 
-                # Draw cursor
-                cursor_size = int(20 * self.device_pixel_ratio)  # Scale cursor size
+                # Draw cursor with adjusted position
+                cursor_size = int(20 * self.scale_factor)
                 cursor = np.zeros((cursor_size, cursor_size, 4), dtype=np.uint8)
-                # White fill
-                cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(6 * self.device_pixel_ratio), (255, 255, 255, 255), -1)
-                # Black outline
-                cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(6 * self.device_pixel_ratio), (0, 0, 0, 255), 1)
-                # Add a black dot in the center
-                cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(1 * self.device_pixel_ratio), (0, 0, 0, 255), -1)
+                cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(6 * self.scale_factor), (255, 255, 255, 255), -1)
+                cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(6 * self.scale_factor), (0, 0, 0, 255), 1)
+                cv2.circle(cursor, (cursor_size//2, cursor_size//2), int(1 * self.scale_factor), (0, 0, 0, 255), -1)
                 
                 cursor_h, cursor_w = cursor.shape[:2]
-                x1 = max(0, screen_x - cursor_w//2)
-                y1 = max(0, screen_y - cursor_h//2)
-                x2 = min(frame.shape[1], x1 + cursor_w)
-                y2 = min(frame.shape[0], y1 + cursor_h)
                 
-                if x2 > x1 and y2 > y1:
+                # Ensure cursor coordinates are within frame bounds
+                cursor_x = int(max(cursor_w//2, min(frame.shape[1] - cursor_w//2, cursor_x)))
+                cursor_y = int(max(cursor_h//2, min(frame.shape[0] - cursor_h//2, cursor_y)))
+                
+                x1 = int(max(0, cursor_x - cursor_w//2))
+                y1 = int(max(0, cursor_y - cursor_h//2))
+                x2 = int(min(frame.shape[1], x1 + cursor_w))
+                y2 = int(min(frame.shape[0], y1 + cursor_h))
+                
+                # Additional bounds check
+                if (x1 >= 0 and y1 >= 0 and x2 <= frame.shape[1] and y2 <= frame.shape[0] and 
+                    x2 > x1 and y2 > y1):
                     # Calculate the visible portion of the cursor
                     cursor_x1 = int(0 if x1 >= 0 else -x1)
                     cursor_y1 = int(0 if y1 >= 0 else -y1)
                     cursor_x2 = int(cursor_w - (cursor_w - (x2 - x1)))
                     cursor_y2 = int(cursor_h - (cursor_h - (y2 - y1)))
                     
-                    if cursor_x2 > cursor_x1 and cursor_y2 > cursor_y1:
+                    if (cursor_x2 > cursor_x1 and cursor_y2 > cursor_y1 and 
+                        cursor_y2 <= cursor.shape[0] and cursor_x2 <= cursor.shape[1]):
                         # Get the alpha channel for blending
                         alpha = cursor[cursor_y1:cursor_y2, cursor_x1:cursor_x2, 3:] / 255.0
                         # Get the cursor RGB values
                         cursor_rgb = cursor[cursor_y1:cursor_y2, cursor_x1:cursor_x2, :3]
                         
-                        # Ensure shapes match
+                        # Ensure shapes match before blending
                         frame_region = frame[y1:y2, x1:x2, :3]
                         if frame_region.shape == cursor_rgb.shape:
                             # Blend cursor with frame
@@ -219,6 +314,9 @@ class ScreenRecorder:
 
     def start_recording(self):
         """Start recording screen and mouse positions"""
+        # Add region selection before starting recording
+        self.select_recording_region()
+        
         print("Starting recording... Press 'q' in preview window to stop.")
         self.recording = True
         self.start_time = time.time()
@@ -492,8 +590,8 @@ def main():
     parser.add_argument('--input', help='Input video file (for process/reprocess action)')
     parser.add_argument('--mouse-data', help='Mouse position data file (for process/reprocess action)')
     parser.add_argument('--output', help='Output video file (optional)')
-    parser.add_argument('--zoom', type=float, default=3.0, 
-                      help='Zoom factor for processing (default: 3.0)')
+    parser.add_argument('--zoom', type=float, default=4.0, 
+                      help='Zoom factor for processing (default: 4.0)')
     parser.add_argument('--monitor', type=int, 
                       help='Monitor number to record (will list monitors if not specified)')
     
@@ -513,7 +611,7 @@ def main():
         if input("\nWould you like to process the recording with zoom effect? (y/n): ").lower() == 'y':
             process_video(video_file, mouse_file, 
                          output_video=os.path.splitext(video_file)[0] + '_zoomed.mp4',
-                         zoom_factor=3.0,
+                         zoom_factor=4.0,
                          zoom_window=1.0)  # 1 second window around each click
     
     elif args.action == 'process':
