@@ -487,13 +487,13 @@ def process_video(input_video, mouse_data, output_video=None, zoom_factor=2.0,
 
 def main():
     parser = argparse.ArgumentParser(description='Screen Recorder with Mouse-Following Zoom')
-    parser.add_argument('action', choices=['record', 'process'], 
-                      help='Action to perform: record new video or process existing video')
-    parser.add_argument('--input', help='Input video file (for process action)')
-    parser.add_argument('--mouse-data', help='Mouse position data file (for process action)')
+    parser.add_argument('action', choices=['record', 'process', 'reprocess'], 
+                      help='Action to perform: record new video, process existing video, or reprocess existing zoomed video')
+    parser.add_argument('--input', help='Input video file (for process/reprocess action)')
+    parser.add_argument('--mouse-data', help='Mouse position data file (for process/reprocess action)')
     parser.add_argument('--output', help='Output video file (optional)')
-    parser.add_argument('--zoom', type=float, default=2.0, 
-                      help='Zoom factor for processing (default: 2.0)')
+    parser.add_argument('--zoom', type=float, default=3.0, 
+                      help='Zoom factor for processing (default: 3.0)')
     parser.add_argument('--monitor', type=int, 
                       help='Monitor number to record (will list monitors if not specified)')
     
@@ -513,13 +513,61 @@ def main():
         if input("\nWould you like to process the recording with zoom effect? (y/n): ").lower() == 'y':
             process_video(video_file, mouse_file, 
                          output_video=os.path.splitext(video_file)[0] + '_zoomed.mp4',
-                         zoom_factor=args.zoom,
+                         zoom_factor=3.0,
                          zoom_window=1.0)  # 1 second window around each click
     
     elif args.action == 'process':
         if not args.input or not args.mouse_data:
             parser.error("process action requires --input and --mouse-data arguments")
         process_video(args.input, args.mouse_data, args.output, args.zoom)
+    
+    elif args.action == 'reprocess':
+        if not args.input:
+            parser.error("reprocess action requires --input argument")
+        
+        # More robust input filename handling
+        input_path = args.input
+        # Remove .mp4 extension if present
+        input_base = input_path[:-4] if input_path.endswith('.mp4') else input_path
+        
+        # Try different possible original video filenames
+        possible_originals = [
+            input_base + '.mp4',  # If input was without extension
+            input_base.replace('_zoomed', '') + '.mp4',  # If input was zoomed version
+            input_base + '_zoomed.mp4'  # If input was original version
+        ]
+        
+        # Find the original video
+        original_video = None
+        for possible in possible_originals:
+            if os.path.exists(possible):
+                original_video = possible
+                break
+        
+        if not original_video:
+            parser.error(f"Could not find original video file. Tried: {', '.join(possible_originals)}")
+        
+        # Similarly handle mouse data file
+        base_for_mouse = original_video[:-4].replace('recording_', 'mouse_')
+        mouse_data = args.mouse_data or f"{base_for_mouse}.json"
+        
+        if not os.path.exists(mouse_data):
+            parser.error(f"Mouse data file not found: {mouse_data}")
+        
+        # Set output path
+        if args.output:
+            output = args.output
+        else:
+            # If input was original, append _zoomed, if it was zoomed, use same name
+            output = (input_base + '_zoomed.mp4' if '_zoomed' not in input_base 
+                     else input_base + '.mp4')
+        
+        print(f"Using original video: {original_video}")
+        print(f"Using mouse data: {mouse_data}")
+        print(f"Output will be saved to: {output}")
+        
+        # Process the video with new zoom settings
+        process_video(original_video, mouse_data, output, args.zoom)
 
 if __name__ == "__main__":
     main()
