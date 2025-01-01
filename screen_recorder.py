@@ -249,21 +249,43 @@ class ScreenRecorder:
         
         print(f"Mouse positions saved to {self.output_mouse}")
 
-def create_zoom_effect(frame, current_time, mouse_positions, zoom_factor=2.0):
-    """Create smooth zoom effect following mouse movement"""
+def create_zoom_effect(frame, current_time, mouse_positions, zoom_factor=2.0, 
+                      region_size=200, dwell_time=0.5, region_memory=1.0):
+    """
+    Create zoom effect based on mouse dwell time in regions
+    
+    Args:
+        frame: The video frame
+        current_time: Current video time
+        mouse_positions: Dictionary of mouse positions
+        zoom_factor: How much to zoom in
+        region_size: Size of the region in pixels to consider as "same area"
+        dwell_time: How long mouse must stay in region to trigger zoom (seconds)
+        region_memory: How long to remember previous positions (seconds)
+    """
     h, w = frame.shape[:2]
-    # Find closest timestamp
-    current_time = f"{current_time:.3f}"
-
-    # Define safe zone (10% buffer from edges)
-    edge_buffer_x = int(w * 0.10)
-    edge_buffer_y = int(h * 0.10)
-    safe_zone = {
-        'left': edge_buffer_x,
-        'right': w - edge_buffer_x,
-        'top': edge_buffer_y,
-        'bottom': h - edge_buffer_y
-    }
+    
+    # Debug print
+    if not hasattr(create_zoom_effect, 'debug_counter'):
+        create_zoom_effect.debug_counter = 0
+    create_zoom_effect.debug_counter += 1
+    
+    if create_zoom_effect.debug_counter % 30 == 0:  # Print every 30 frames
+        print(f"\nDebug info at time {current_time:.2f}:")
+        print(f"Mouse positions available: {len(mouse_positions)} entries")
+        print(f"Current region points: {len(current_region_points) if 'current_region_points' in locals() else 0}")
+        if hasattr(create_zoom_effect, 'current_zoom'):
+            print(f"Current zoom: {create_zoom_effect.current_zoom:.2f}")
+            print(f"Target zoom: {create_zoom_effect.target_zoom if hasattr(create_zoom_effect, 'target_zoom') else 1.0}")
+        if hasattr(create_zoom_effect, 'zoom_center'):
+            print(f"Zoom center: {create_zoom_effect.zoom_center}")
+    
+    # Static variables for tracking regions
+    if not hasattr(create_zoom_effect, 'region_history'):
+        create_zoom_effect.region_history = []  # List of (time, x, y) tuples
+        create_zoom_effect.current_zoom = 1.0
+        create_zoom_effect.target_zoom = 1.0
+        create_zoom_effect.zoom_center = None
     
     # Debug print to see what's happening
     print(f"Time: {current_time}, Available times: {list(mouse_positions.keys())[:5]}...")
@@ -279,29 +301,36 @@ def create_zoom_effect(frame, current_time, mouse_positions, zoom_factor=2.0):
     # Get current mouse position
     x, y = mouse_positions[closest_time]
     x, y = int(x), int(y)
-    print(f"Processing frame at time {current_time}, mouse at ({x}, {y})")
     
-    # Static variables for smooth transitions (using function attributes)
-    if not hasattr(create_zoom_effect, 'last_pos'):
-        create_zoom_effect.last_pos = (x, y)
-        create_zoom_effect.current_zoom = 1.0
+    # Update region history
+    create_zoom_effect.region_history.append((float(current_time), x, y))
+    
+    # Remove old positions outside the memory window
+    create_zoom_effect.region_history = [
+        (t, px, py) for t, px, py in create_zoom_effect.region_history
+        if current_time - t <= region_memory
+    ]
+    
+    # Check if we've been in the same region
+    current_region_points = []
+    for t, px, py in create_zoom_effect.region_history:
+        if (abs(px - x) <= region_size/2 and 
+            abs(py - y) <= region_size/2):
+            current_region_points.append((t, px, py))
+    
+    # Calculate time spent in current region
+    if current_region_points:
+        time_in_region = current_time - min(t for t, _, _ in current_region_points)
+        if time_in_region >= dwell_time:
+            # Calculate center of region
+            avg_x = sum(px for _, px, _ in current_region_points) / len(current_region_points)
+            avg_y = sum(py for _, _, py in current_region_points) / len(current_region_points)
+            create_zoom_effect.target_zoom = zoom_factor
+            create_zoom_effect.zoom_center = (int(avg_x), int(avg_y))
+        else:
+            create_zoom_effect.target_zoom = 1.0
+    else:
         create_zoom_effect.target_zoom = 1.0
-        create_zoom_effect.smoothed_x = x
-        create_zoom_effect.smoothed_y = y
-    
-    # Check if mouse is in safe zone
-    in_safe_zone = (safe_zone['left'] < x < safe_zone['right'] and 
-                   safe_zone['top'] < y < safe_zone['bottom'])
-    
-    # Update target zoom based on safe zone
-    create_zoom_effect.target_zoom = zoom_factor if in_safe_zone else 1.0
-    
-    # Smooth position transition (exponential moving average)
-    position_smoothing = 0.85  # Higher = smoother but more latency
-    create_zoom_effect.smoothed_x = int(position_smoothing * create_zoom_effect.smoothed_x + 
-                                      (1 - position_smoothing) * x)
-    create_zoom_effect.smoothed_y = int(position_smoothing * create_zoom_effect.smoothed_y + 
-                                      (1 - position_smoothing) * y)
     
     # Smooth zoom transition
     zoom_smoothing = 0.90  # Higher = smoother transition
@@ -310,35 +339,37 @@ def create_zoom_effect(frame, current_time, mouse_positions, zoom_factor=2.0):
     
     # If no zoom needed, return original frame
     if abs(create_zoom_effect.current_zoom - 1.0) < 0.01:
+        create_zoom_effect.zoom_center = None
         return frame
     
-    # Calculate the region to zoom into
-    zoom_center_x = create_zoom_effect.smoothed_x
-    zoom_center_y = create_zoom_effect.smoothed_y
+    # Calculate zoom window
+    if create_zoom_effect.zoom_center:
+        center_x, center_y = create_zoom_effect.zoom_center
+        window_w = w / create_zoom_effect.current_zoom
+        window_h = h / create_zoom_effect.current_zoom
+        
+        x1 = int(center_x - window_w/2)
+        y1 = int(center_y - window_h/2)
+        x2 = int(center_x + window_w/2)
+        y2 = int(center_y + window_h/2)
+        
+        # Ensure zoom window stays within frame bounds
+        x1 = max(0, min(x1, w - int(window_w)))
+        y1 = max(0, min(y1, h - int(window_h)))
+        x2 = min(w, x1 + int(window_w))
+        y2 = min(h, y1 + int(window_h))
+        
+        # Extract and resize the region
+        zoomed_region = frame[y1:y2, x1:x2]
+        zoomed = cv2.resize(zoomed_region, (w, h), interpolation=cv2.INTER_LINEAR)
+        return zoomed
     
-    # Calculate zoom window size
-    window_w = w / create_zoom_effect.current_zoom
-    window_h = h / create_zoom_effect.current_zoom
-    
-    # Calculate zoom window boundaries
-    x1 = int(zoom_center_x - window_w/2)
-    y1 = int(zoom_center_y - window_h/2)
-    x2 = int(zoom_center_x + window_w/2)
-    y2 = int(zoom_center_y + window_h/2)
-    
-    # Ensure zoom window stays within frame bounds
-    x1 = max(0, min(x1, w - int(window_w)))
-    y1 = max(0, min(y1, h - int(window_h)))
-    x2 = min(w, x1 + int(window_w))
-    y2 = min(h, y1 + int(window_h))
-    
-    # Extract and resize the region
-    zoomed_region = frame[y1:y2, x1:x2]
-    zoomed = cv2.resize(zoomed_region, (w, h), interpolation=cv2.INTER_LINEAR)
-    
-    return zoomed
+    return frame
 
-def process_video(input_video, mouse_data, output_video=None, zoom_factor=2):
+def process_video(input_video, mouse_data, output_video=None, zoom_factor=2.0,
+                 region_size=200,     # Keep this the same
+                 dwell_time=1.5,      # Increased from 0.5 to 1.5 seconds
+                 region_memory=2.0):   # Increased from 1.0 to 2.0 seconds
     """Add zoom effect to video"""
     if output_video is None:
         output_video = os.path.splitext(input_video)[0] + '_zoomed.mp4'
@@ -462,7 +493,10 @@ def main():
         if input("\nWould you like to process the recording with zoom effect? (y/n): ").lower() == 'y':
             process_video(video_file, mouse_file, 
                          output_video=os.path.splitext(video_file)[0] + '_zoomed.mp4',
-                         zoom_factor=args.zoom)
+                         zoom_factor=args.zoom,
+                         region_size=200,
+                         dwell_time=1.5,      # Increased to 1.5 seconds
+                         region_memory=2.0)    # Increased to 2.0 seconds
     
     elif args.action == 'process':
         if not args.input or not args.mouse_data:
