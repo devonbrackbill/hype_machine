@@ -293,7 +293,7 @@ class ScreenRecorder:
         print(f"Mouse positions and click events saved to {self.output_mouse}")
 
 def create_zoom_effect(frame, current_time, mouse_positions, click_events, zoom_factor=2.0, 
-                      zoom_window=1.0):  # Time window around click (seconds)
+                      zoom_window=1.0, pre_click_ratio=0.15):  # 15% of window before click
     """Create zoom effect based on click events"""
     h, w = frame.shape[:2]
     
@@ -301,6 +301,7 @@ def create_zoom_effect(frame, current_time, mouse_positions, click_events, zoom_
     if not hasattr(create_zoom_effect, 'current_zoom'):
         create_zoom_effect.current_zoom = 1.0
         create_zoom_effect.zoom_center = None
+        create_zoom_effect.last_click_time = None
     
     # Find nearest click event
     click_times = [float(t) for t in click_events.keys()]
@@ -309,25 +310,37 @@ def create_zoom_effect(frame, current_time, mouse_positions, click_events, zoom_
     
     # Find the closest click event
     closest_click = min(click_times, key=lambda t: abs(t - current_time))
-    time_to_click = abs(current_time - closest_click)
+    time_to_click = current_time - closest_click
     
     # Calculate zoom based on proximity to click
-    if time_to_click <= zoom_window:
+    # Adjust timing so click happens after 15% of the window
+    adjusted_time = time_to_click + (zoom_window * pre_click_ratio)
+    
+    if 0 <= adjusted_time <= zoom_window * 2.0:  # Doubled the zoom window duration
         # Get click position
         x, y = click_events[f"{closest_click:.3f}"]
         
-        # Calculate zoom level (peak at click time)
-        zoom_progress = 1.0 - (time_to_click / zoom_window)
-        target_zoom = 1.0 + (zoom_factor - 1.0) * zoom_progress
+        # Calculate zoom level with longer hold at max zoom
+        if adjusted_time < zoom_window * 0.3:  # Zoom in phase (30% of window)
+            zoom_progress = 1.0 - (adjusted_time / (zoom_window * 0.3))
+        elif adjusted_time < zoom_window * 1.7:  # Hold phase (140% of window)
+            zoom_progress = 1.0
+        else:  # Zoom out phase (remaining 30% of window)
+            zoom_progress = (zoom_window * 2.0 - adjusted_time) / (zoom_window * 0.3)
         
-        # Increase smoothing factor (was 0.90)
-        zoom_smoothing = 0.95  # Higher value = smoother, more stable zoom
+        target_zoom = 1.0 + (zoom_factor - 1.0) * max(0, min(1, zoom_progress))
+        
+        # Quick zoom in, slower zoom out
+        zoom_smoothing = 0.85 if zoom_progress > create_zoom_effect.current_zoom else 0.90
         create_zoom_effect.current_zoom = (zoom_smoothing * create_zoom_effect.current_zoom + 
                                          (1 - zoom_smoothing) * target_zoom)
         create_zoom_effect.zoom_center = (int(x), int(y))
+        create_zoom_effect.last_click_time = closest_click
     else:
-        # Slower return to no zoom (was 0.95)
-        create_zoom_effect.current_zoom = max(1.0, create_zoom_effect.current_zoom * 0.98)
+        # Quick return to no zoom
+        create_zoom_effect.current_zoom = max(1.0, create_zoom_effect.current_zoom * 0.90)
+        if abs(create_zoom_effect.current_zoom - 1.0) < 0.01:
+            create_zoom_effect.zoom_center = None
     
     # Apply zoom if needed
     if create_zoom_effect.current_zoom > 1.01 and create_zoom_effect.zoom_center:
