@@ -249,62 +249,94 @@ class ScreenRecorder:
         
         print(f"Mouse positions saved to {self.output_mouse}")
 
-def create_zoom_effect(frame, t, mouse_positions, zoom_factor=2, zoom_region_size=300):
-    """Create zoom effect around mouse position"""
+def create_zoom_effect(frame, current_time, mouse_positions, zoom_factor=2.0):
+    """Create smooth zoom effect following mouse movement"""
     h, w = frame.shape[:2]
-    
     # Find closest timestamp
-    current_time = f"{t:.3f}"
+    current_time = f"{current_time:.3f}"
+
+    # Define safe zone (10% buffer from edges)
+    edge_buffer_x = int(w * 0.10)
+    edge_buffer_y = int(h * 0.10)
+    safe_zone = {
+        'left': edge_buffer_x,
+        'right': w - edge_buffer_x,
+        'top': edge_buffer_y,
+        'bottom': h - edge_buffer_y
+    }
     
     # Debug print to see what's happening
     print(f"Time: {current_time}, Available times: {list(mouse_positions.keys())[:5]}...")
-    
-    # Find the closest timestamp
-    closest_time = min(mouse_positions.keys(), 
-                      key=lambda x: abs(float(x) - float(current_time)),
+    # Find closest mouse position in time
+    closest_time = min(mouse_positions.keys(),
+                      key=lambda t: abs(float(t) - float(current_time)),
                       default=None)
     
     if closest_time is None:
         print(f"No mouse position found for time {current_time}")
         return frame
     
-    # Get mouse position
+    # Get current mouse position
     x, y = mouse_positions[closest_time]
+    x, y = int(x), int(y)
     print(f"Processing frame at time {current_time}, mouse at ({x}, {y})")
     
-    # Convert coordinates to integers
-    x = int(x)
-    y = int(y)
+    # Static variables for smooth transitions (using function attributes)
+    if not hasattr(create_zoom_effect, 'last_pos'):
+        create_zoom_effect.last_pos = (x, y)
+        create_zoom_effect.current_zoom = 1.0
+        create_zoom_effect.target_zoom = 1.0
+        create_zoom_effect.smoothed_x = x
+        create_zoom_effect.smoothed_y = y
     
-    # Check if mouse is off screen
-    if x < 0 or y < 0 or x > w or y > h:
+    # Check if mouse is in safe zone
+    in_safe_zone = (safe_zone['left'] < x < safe_zone['right'] and 
+                   safe_zone['top'] < y < safe_zone['bottom'])
+    
+    # Update target zoom based on safe zone
+    create_zoom_effect.target_zoom = zoom_factor if in_safe_zone else 1.0
+    
+    # Smooth position transition (exponential moving average)
+    position_smoothing = 0.85  # Higher = smoother but more latency
+    create_zoom_effect.smoothed_x = int(position_smoothing * create_zoom_effect.smoothed_x + 
+                                      (1 - position_smoothing) * x)
+    create_zoom_effect.smoothed_y = int(position_smoothing * create_zoom_effect.smoothed_y + 
+                                      (1 - position_smoothing) * y)
+    
+    # Smooth zoom transition
+    zoom_smoothing = 0.90  # Higher = smoother transition
+    create_zoom_effect.current_zoom = (zoom_smoothing * create_zoom_effect.current_zoom + 
+                                     (1 - zoom_smoothing) * create_zoom_effect.target_zoom)
+    
+    # If no zoom needed, return original frame
+    if abs(create_zoom_effect.current_zoom - 1.0) < 0.01:
         return frame
     
-    # Calculate zoom center
-    center_x = x
-    center_y = y
+    # Calculate the region to zoom into
+    zoom_center_x = create_zoom_effect.smoothed_x
+    zoom_center_y = create_zoom_effect.smoothed_y
     
-    # Create transformation matrix
-    M = cv2.getRotationMatrix2D((center_x, center_y), 0, zoom_factor)
+    # Calculate zoom window size
+    window_w = w / create_zoom_effect.current_zoom
+    window_h = h / create_zoom_effect.current_zoom
     
-    # Adjust translation to keep mouse position centered
-    M[0, 2] += (w/2 - center_x)
-    M[1, 2] += (h/2 - center_y)
+    # Calculate zoom window boundaries
+    x1 = int(zoom_center_x - window_w/2)
+    y1 = int(zoom_center_y - window_h/2)
+    x2 = int(zoom_center_x + window_w/2)
+    y2 = int(zoom_center_y + window_h/2)
     
-    # Apply affine transformation
-    zoomed = cv2.warpAffine(frame, M, (w, h), flags=cv2.INTER_LINEAR)
+    # Ensure zoom window stays within frame bounds
+    x1 = max(0, min(x1, w - int(window_w)))
+    y1 = max(0, min(y1, h - int(window_h)))
+    x2 = min(w, x1 + int(window_w))
+    y2 = min(h, y1 + int(window_h))
     
-    # Create smooth transition mask
-    mask = np.zeros((h, w))
-    cv2.circle(mask, (w//2, h//2), int(w/3), 1.0, -1)
-    mask = cv2.GaussianBlur(mask, (99, 99), 50)
-    mask = np.clip(mask, 0, 1)
-    mask = mask[:,:,np.newaxis]
+    # Extract and resize the region
+    zoomed_region = frame[y1:y2, x1:x2]
+    zoomed = cv2.resize(zoomed_region, (w, h), interpolation=cv2.INTER_LINEAR)
     
-    # Blend original and zoomed frames
-    result = (frame * (1 - mask) + zoomed * mask).astype(np.uint8)
-    
-    return result
+    return zoomed
 
 def process_video(input_video, mouse_data, output_video=None, zoom_factor=2):
     """Add zoom effect to video"""
