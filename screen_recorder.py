@@ -120,7 +120,7 @@ class ScreenRecorder:
                 frame = np.frombuffer(buffer, dtype=np.uint8).reshape(
                     image.height(), image.width(), 4).copy()
                 
-                # Draw cursor on frame
+                # Draw cursor
                 cursor_h, cursor_w = cursor.shape[:2]
                 x1 = max(0, screen_x - cursor_w//2)
                 y1 = max(0, screen_y - cursor_h//2)
@@ -147,15 +147,13 @@ class ScreenRecorder:
                             blended = frame_region * (1 - alpha) + cursor_rgb * alpha
                             frame[y1:y2, x1:x2, :3] = blended
                 
-                # Convert RGBA to RGB
-                frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
-                
-                # Store frame
-                self.frames.append(frame)
+                # Store frame with swapped channels for final video
+                final_frame = frame[:, :, [2, 1, 0]].copy()  # Swap R and B channels
+                self.frames.append(final_frame)
                 frame_count += 1
                 
-                # Show preview
-                preview = cv2.resize(frame, None, fx=preview_scale, fy=preview_scale)
+                # Show preview with original channels
+                preview = cv2.resize(frame[:, :, :3], None, fx=preview_scale, fy=preview_scale)
                 cv2.imshow('Recording Preview (Press "q" to stop)', preview)
                 
                 last_frame_time = current_time
