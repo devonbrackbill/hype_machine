@@ -688,12 +688,15 @@ def main():
         # Generate unique filenames
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         video_file = args.output or f"recording_{timestamp}.mp4"
-        mouse_file = f"mouse_{timestamp}.json"
+        
+        # Update: Generate mouse file based on video file name
+        base_name = os.path.splitext(video_file)[0]  # Remove extension
+        mouse_file = f"{base_name}_mouse.json"  # Add _mouse suffix
         
         # Record screen and mouse positions
         recorder = ScreenRecorder(
             video_file, 
-            mouse_file, 
+            mouse_file,  # Now using the coordinated mouse file name
             args.monitor,
             fixed_width=args.width,
             fixed_height=args.height
