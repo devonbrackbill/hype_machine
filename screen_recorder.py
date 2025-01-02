@@ -565,6 +565,88 @@ def create_zoom_effect(frame, current_time, mouse_positions, click_events, zoom_
     
     return frame
 
+def create_zoom_effect_experimental(frame, current_time, mouse_positions, click_events, zoom_factor=2.0, 
+                                  zoom_window=2.0, pre_click_ratio=0.15):
+    """Experimental version of zoom effect to test improvements"""
+    h, w = frame.shape[:2]
+    
+    # Initialize static variables
+    if not hasattr(create_zoom_effect_experimental, 'current_zoom'):
+        create_zoom_effect_experimental.current_zoom = 1.0
+        create_zoom_effect_experimental.zoom_center = None
+        create_zoom_effect_experimental.last_click_time = None
+    
+    # Find nearest click event
+    click_times = [float(t) for t in click_events.keys()]
+    if not click_times:
+        return frame
+    
+    # Find the closest click event that's not too far in the future
+    valid_clicks = [t for t in click_times if (current_time - t) > -0.1]
+    if not valid_clicks:
+        # Quick dezoom when no valid clicks
+        create_zoom_effect_experimental.current_zoom = max(1.0, create_zoom_effect_experimental.current_zoom * 0.8)
+        if create_zoom_effect_experimental.current_zoom <= 1.01:
+            create_zoom_effect_experimental.zoom_center = None
+            return frame
+    else:
+        closest_click = max(valid_clicks)
+        time_since_click = current_time - closest_click
+        
+        # Get click position
+        click_x, click_y = click_events[f"{closest_click:.3f}"]
+        
+        # Handle new click
+        if create_zoom_effect_experimental.last_click_time != closest_click:
+            create_zoom_effect_experimental.last_click_time = closest_click
+            create_zoom_effect_experimental.zoom_center = (click_x, click_y)
+            print(f"New click at ({click_x}, {click_y})")  # Debug print
+        
+        # Simple zoom timing
+        if 0 <= time_since_click <= zoom_window:
+            # Fast zoom in (0.3s)
+            if time_since_click < 0.3:
+                zoom_progress = time_since_click / 0.3
+                create_zoom_effect_experimental.current_zoom = 1.0 + (zoom_factor - 1.0) * zoom_progress
+            # Hold zoom (1.4s)
+            elif time_since_click < 1.7:
+                create_zoom_effect_experimental.current_zoom = zoom_factor
+            # Fast zoom out (0.3s)
+            else:
+                zoom_progress = (zoom_window - time_since_click) / 0.3
+                create_zoom_effect_experimental.current_zoom = 1.0 + (zoom_factor - 1.0) * max(0, zoom_progress)
+    
+    # Apply zoom if needed
+    if create_zoom_effect_experimental.current_zoom > 1.01 and create_zoom_effect_experimental.zoom_center:
+        center_x, center_y = create_zoom_effect_experimental.zoom_center
+        
+        # Calculate zoom window size
+        window_w = int(w / create_zoom_effect_experimental.current_zoom)
+        window_h = int(h / create_zoom_effect_experimental.current_zoom)
+        
+        # Calculate zoom window boundaries
+        x1 = int(center_x - window_w/2)
+        y1 = int(center_y - window_h/2)
+        
+        # Ensure zoom window stays within frame bounds
+        x1 = max(0, min(x1, w - window_w))
+        y1 = max(0, min(y1, h - window_h))
+        x2 = x1 + window_w
+        y2 = y1 + window_h
+        
+        # Extract and resize the region
+        zoomed_region = frame[y1:y2, x1:x2]
+        zoomed = cv2.resize(zoomed_region, (w, h), interpolation=cv2.INTER_LINEAR)
+        
+        # Debug prints
+        print(f"Zoom: {create_zoom_effect_experimental.current_zoom:.2f}, "
+              f"Center: ({center_x}, {center_y}), "
+              f"Window: ({x1}, {y1}, {x2}, {y2})")
+        
+        return zoomed
+    
+    return frame
+
 def process_video(input_video, mouse_data, output_video=None, zoom_factor=2.0,
                  zoom_window=1.0):  # Time window around click (seconds)
     """Add zoom effect to video"""
@@ -614,7 +696,7 @@ def process_video(input_video, mouse_data, output_video=None, zoom_factor=2.0,
             current_time = frame_number / fps
             
             # Process frame
-            processed_frame = create_zoom_effect(
+            processed_frame = create_zoom_effect_experimental(
                 frame,
                 current_time,
                 mouse_positions,
@@ -743,12 +825,21 @@ def main():
         if not original_video:
             parser.error(f"Could not find original video file. Tried: {', '.join(possible_originals)}")
         
-        # Similarly handle mouse data file
-        base_for_mouse = original_video[:-4].replace('recording_', 'mouse_')
-        mouse_data = args.mouse_data or f"{base_for_mouse}.json"
+        # Try both naming patterns for mouse data file
+        possible_mouse_files = [
+            original_video.replace('.mp4', '_mouse.json'),  # video_mouse.json
+            original_video.replace('.mp4', '.json')         # video.json
+        ]
+        
+        mouse_data = args.mouse_data
+        if not mouse_data:
+            for possible in possible_mouse_files:
+                if os.path.exists(possible):
+                    mouse_data = possible
+                    break
         
         if not os.path.exists(mouse_data):
-            parser.error(f"Mouse data file not found: {mouse_data}")
+            parser.error(f"Mouse data file not found. Tried: {', '.join(possible_mouse_files)}")
         
         # Set output path
         if args.output:
