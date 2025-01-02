@@ -8,7 +8,7 @@ from datetime import datetime
 import argparse
 import os
 from moviepy import VideoFileClip
-from PyQt6.QtWidgets import QApplication, QRubberBand, QWidget
+from PyQt6.QtWidgets import QApplication, QRubberBand, QWidget, QDialog
 from PyQt6.QtCore import Qt, QRect, QPoint
 from PyQt6.QtGui import QScreen, QCursor
 import sys
@@ -203,6 +203,11 @@ class ScreenRecorder:
             self.recording_region = self.screen_geometry
             print("Using full screen recording")
 
+        # After region is selected, store it
+        self.recording_region = {'x': self.recording_region.x(), 'y': self.recording_region.y(), 
+                                  'width': self.recording_region.width(), 'height': self.recording_region.height()}
+        return self.recording_region['x'], self.recording_region['y'], self.recording_region['width'], self.recording_region['height']
+
     def get_mouse_position(self):
         """Get current mouse position relative to recording region"""
         cursor = QCursor.pos()
@@ -235,12 +240,12 @@ class ScreenRecorder:
                 mouse_pos = QCursor.pos()
                 if self.recording_region:
                     # Calculate cursor position relative to recording region
-                    cursor_x = int((mouse_pos.x() - self.recording_region.x()) * self.scale_factor)
-                    cursor_y = int((mouse_pos.y() - self.recording_region.y()) * self.scale_factor)
+                    cursor_x = int((mouse_pos.x() - self.recording_region['x']) * self.scale_factor)
+                    cursor_y = int((mouse_pos.y() - self.recording_region['y']) * self.scale_factor)
                     
                     # Ensure cursor stays within bounds
-                    cursor_x = max(0, min(cursor_x, self.recording_region.width() * self.scale_factor))
-                    cursor_y = max(0, min(cursor_y, self.recording_region.height() * self.scale_factor))
+                    cursor_x = max(0, min(cursor_x, self.recording_region['width'] * self.scale_factor))
+                    cursor_y = max(0, min(cursor_y, self.recording_region['height'] * self.scale_factor))
                 else:
                     cursor_x = int((mouse_pos.x() - self.screen_geometry.x()) * self.scale_factor)
                     cursor_y = int((mouse_pos.y() - self.screen_geometry.y()) * self.scale_factor)
@@ -265,14 +270,14 @@ class ScreenRecorder:
                 
                 # Modify the screen capture to use the selected region
                 if self.recording_region:
-                    scaled_width = int(self.recording_region.width() * self.scale_factor)
-                    scaled_height = int(self.recording_region.height() * self.scale_factor)
+                    scaled_width = int(self.recording_region['width'] * self.scale_factor)
+                    scaled_height = int(self.recording_region['height'] * self.scale_factor)
                     pixmap = self.selected_screen.grabWindow(
                         0,
-                        self.recording_region.x(),
-                        self.recording_region.y(),
-                        self.recording_region.width(),
-                        self.recording_region.height()
+                        self.recording_region['x'],
+                        self.recording_region['y'],
+                        self.recording_region['width'],
+                        self.recording_region['height']
                     )
                     # Scale the captured image to account for Retina display
                     if self.scale_factor != 1:
@@ -381,19 +386,17 @@ class ScreenRecorder:
     def on_click(self, x, y, button, pressed):
         """Callback for mouse clicks"""
         if self.recording and self.start_time is not None and pressed and button == mouse.Button.left:
-            # Convert global coordinates to screen-relative coordinates
-            screen_x = int((x - self.screen_geometry.x()) * self.device_pixel_ratio)
-            screen_y = int((y - self.screen_geometry.y()) * self.device_pixel_ratio)
+            # Convert global coordinates to recording-region-relative coordinates
+            region_x = x - self.recording_region['x']
+            region_y = y - self.recording_region['y']
             
-            # Check if click is within screen bounds
-            if (0 <= screen_x < self.screen_geometry.width() * self.device_pixel_ratio and 
-                0 <= screen_y < self.screen_geometry.height() * self.device_pixel_ratio):
-                
+            # Only record if click is within recording region bounds
+            if (0 <= region_x < self.recording_region['width'] and 
+                0 <= region_y < self.recording_region['height']):
                 current_time = time.time() - self.start_time
-                self.click_events[f"{current_time:.3f}"] = [screen_x, screen_y]
-                print(f"Click detected at ({screen_x}, {screen_y})")
-            else:
-                print(f"Ignoring off-screen click at ({screen_x}, {screen_y})")
+                # Store the coordinates directly (no need for screen_x calculation)
+                self.click_events[f"{current_time:.3f}"] = [region_x, region_y]
+                print(f"Click detected at ({region_x}, {region_y})")
 
     def start_recording(self):
         """Start recording screen and mouse positions"""
@@ -472,6 +475,16 @@ class ScreenRecorder:
             json.dump(data, f)
         
         print(f"Mouse positions and click events saved to {self.output_mouse}")
+
+    def save_mouse_data(self):
+        # Modify the data dictionary to include region
+        data = {
+            'positions': self.mouse_positions,
+            'clicks': self.click_events,
+            'region': getattr(self, 'recording_region', None)  # Add region if it exists
+        }
+        with open(self.output_mouse, 'w') as f:
+            json.dump(data, f)
 
 def create_zoom_effect(frame, current_time, mouse_positions, click_events, zoom_factor=2.0, 
                       zoom_window=1.0, pre_click_ratio=0.15):
@@ -565,9 +578,9 @@ def create_zoom_effect(frame, current_time, mouse_positions, click_events, zoom_
     
     return frame
 
-def create_zoom_effect_experimental(frame, current_time, mouse_positions, click_events, zoom_factor=2.0, 
-                                  zoom_window=2.0, pre_click_ratio=0.15):
-    """Experimental version of zoom effect to test improvements"""
+def create_zoom_effect_experimental(frame, current_time, mouse_positions, click_events, zoom_factor=1.25, 
+                                  zoom_window=2.0):
+    """Experimental version of zoom effect with improved behavior"""
     h, w = frame.shape[:2]
     
     # Initialize static variables
@@ -575,79 +588,90 @@ def create_zoom_effect_experimental(frame, current_time, mouse_positions, click_
         create_zoom_effect_experimental.current_zoom = 1.0
         create_zoom_effect_experimental.zoom_center = None
         create_zoom_effect_experimental.last_click_time = None
+        create_zoom_effect_experimental.is_zooming_out = False
     
-    # Find nearest click event
+    # Find valid clicks
     click_times = [float(t) for t in click_events.keys()]
     if not click_times:
         return frame
     
-    # Find the closest click event that's not too far in the future
     valid_clicks = [t for t in click_times if (current_time - t) > -0.1]
     if not valid_clicks:
-        # Quick dezoom when no valid clicks
-        create_zoom_effect_experimental.current_zoom = max(1.0, create_zoom_effect_experimental.current_zoom * 0.8)
-        if create_zoom_effect_experimental.current_zoom <= 1.01:
-            create_zoom_effect_experimental.zoom_center = None
-            return frame
-    else:
-        closest_click = max(valid_clicks)
-        time_since_click = current_time - closest_click
-        
-        # Get click position
-        click_x, click_y = click_events[f"{closest_click:.3f}"]
-        
-        # Handle new click
-        if create_zoom_effect_experimental.last_click_time != closest_click:
-            create_zoom_effect_experimental.last_click_time = closest_click
-            create_zoom_effect_experimental.zoom_center = (click_x, click_y)
-            print(f"New click at ({click_x}, {click_y})")  # Debug print
-        
-        # Simple zoom timing
-        if 0 <= time_since_click <= zoom_window:
-            # Fast zoom in (0.3s)
-            if time_since_click < 0.3:
-                zoom_progress = time_since_click / 0.3
-                create_zoom_effect_experimental.current_zoom = 1.0 + (zoom_factor - 1.0) * zoom_progress
-            # Hold zoom (1.4s)
-            elif time_since_click < 1.7:
-                create_zoom_effect_experimental.current_zoom = zoom_factor
-            # Fast zoom out (0.3s)
+        if create_zoom_effect_experimental.current_zoom > 1.01:
+            create_zoom_effect_experimental.current_zoom = max(1.0, create_zoom_effect_experimental.current_zoom * 0.9)
+        return frame
+
+    closest_click = max(valid_clicks)
+    time_since_click = current_time - closest_click
+    
+    # Get click position - clicks should now be in frame coordinates
+    # since we transformed them during recording
+    frame_x, frame_y = click_events[f"{closest_click:.3f}"]
+    
+    # Debug print
+    print(f"Frame click: ({frame_x}, {frame_y})")
+    
+    # Check if this is a new click
+    if create_zoom_effect_experimental.last_click_time != closest_click:
+        if create_zoom_effect_experimental.zoom_center and create_zoom_effect_experimental.current_zoom > 1.01:
+            old_x, old_y = create_zoom_effect_experimental.zoom_center
+            zoom_radius_x = (w / create_zoom_effect_experimental.current_zoom) * 0.75
+            zoom_radius_y = (h / create_zoom_effect_experimental.current_zoom) * 0.75
+            within_zoom = (abs(frame_x - old_x) < zoom_radius_x and 
+                         abs(frame_y - old_y) < zoom_radius_y)
+            
+            if within_zoom:
+                create_zoom_effect_experimental.zoom_center = (frame_x, frame_y)
             else:
-                zoom_progress = (zoom_window - time_since_click) / 0.3
-                create_zoom_effect_experimental.current_zoom = 1.0 + (zoom_factor - 1.0) * max(0, zoom_progress)
+                create_zoom_effect_experimental.is_zooming_out = True
+        else:
+            create_zoom_effect_experimental.zoom_center = (frame_x, frame_y)
+            create_zoom_effect_experimental.is_zooming_out = False
+        
+        create_zoom_effect_experimental.last_click_time = closest_click
+    
+    # Handle zoom levels
+    if create_zoom_effect_experimental.is_zooming_out:
+        create_zoom_effect_experimental.current_zoom = max(1.0, create_zoom_effect_experimental.current_zoom * 0.85)
+        if create_zoom_effect_experimental.current_zoom <= 1.01:
+            create_zoom_effect_experimental.is_zooming_out = False
+            create_zoom_effect_experimental.zoom_center = (frame_x, frame_y)
+    else:
+        if time_since_click < 0.3:  # Quick zoom in
+            zoom_progress = time_since_click / 0.3
+            create_zoom_effect_experimental.current_zoom = 1.0 + (zoom_factor - 1.0) * zoom_progress
+        elif time_since_click < 1.7:  # Hold zoom
+            create_zoom_effect_experimental.current_zoom = zoom_factor
+        else:  # Auto zoom out
+            create_zoom_effect_experimental.current_zoom = max(1.0, create_zoom_effect_experimental.current_zoom * 0.95)
     
     # Apply zoom if needed
     if create_zoom_effect_experimental.current_zoom > 1.01 and create_zoom_effect_experimental.zoom_center:
         center_x, center_y = create_zoom_effect_experimental.zoom_center
-        
-        # Calculate zoom window size
         window_w = int(w / create_zoom_effect_experimental.current_zoom)
         window_h = int(h / create_zoom_effect_experimental.current_zoom)
         
-        # Calculate zoom window boundaries
-        x1 = int(center_x - window_w/2)
-        y1 = int(center_y - window_h/2)
+        # Calculate window boundaries centered exactly on click
+        x1 = int(center_x - window_w / 2)
+        y1 = int(center_y - window_h / 2)
         
-        # Ensure zoom window stays within frame bounds
+        # Ensure boundaries are within frame
         x1 = max(0, min(x1, w - window_w))
         y1 = max(0, min(y1, h - window_h))
         x2 = x1 + window_w
         y2 = y1 + window_h
         
-        # Extract and resize the region
+        # Debug print
+        print(f"Zoom: {create_zoom_effect_experimental.current_zoom:.2f}, "
+              f"Center: ({center_x}, {center_y}), Window: ({x1}, {y1}, {x2}, {y2})")
+        
         zoomed_region = frame[y1:y2, x1:x2]
         zoomed = cv2.resize(zoomed_region, (w, h), interpolation=cv2.INTER_LINEAR)
-        
-        # Debug prints
-        print(f"Zoom: {create_zoom_effect_experimental.current_zoom:.2f}, "
-              f"Center: ({center_x}, {center_y}), "
-              f"Window: ({x1}, {y1}, {x2}, {y2})")
-        
         return zoomed
     
     return frame
 
-def process_video(input_video, mouse_data, output_video=None, zoom_factor=2.0,
+def process_video(input_video, mouse_data, output_video=None, zoom_factor=1.25,
                  zoom_window=1.0):  # Time window around click (seconds)
     """Add zoom effect to video"""
     if output_video is None:
@@ -755,8 +779,8 @@ def main():
     parser.add_argument('--input', help='Input video file (for process/reprocess action)')
     parser.add_argument('--mouse-data', help='Mouse position data file (for process/reprocess action)')
     parser.add_argument('--output', help='Output video file (optional)')
-    parser.add_argument('--zoom', type=float, default=4.0, 
-                      help='Zoom factor for processing (default: 4.0)')
+    parser.add_argument('--zoom', type=float, default=1.25, 
+                      help='Zoom factor for processing (default: 1.25)')
     parser.add_argument('--monitor', type=int, 
                       help='Monitor number to record (will list monitors if not specified)')
     parser.add_argument('--width', type=int, help='Fixed width of recording region in pixels')
@@ -791,7 +815,7 @@ def main():
         if input("\nWould you like to process the recording with zoom effect? (y/n): ").lower() == 'y':
             process_video(video_file, mouse_file, 
                          output_video=os.path.splitext(video_file)[0] + '_zoomed.mp4',
-                         zoom_factor=4.0,
+                         zoom_factor=1.25,
                          zoom_window=1.0)  # 1 second window around each click
     
     elif args.action == 'process':
