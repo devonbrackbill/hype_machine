@@ -578,9 +578,25 @@ def create_zoom_effect(frame, current_time, mouse_positions, click_events, zoom_
     
     return frame
 
-def create_zoom_effect_experimental(frame, current_time, mouse_positions, click_events, zoom_factor=1.25, 
-                                  zoom_window=2.0):
-    """Experimental version of zoom effect with improved behavior"""
+def create_zoom_effect_experimental(frame, current_time, mouse_positions, click_events, 
+                                  zoom_factor=1.25, 
+                                  zoom_window=2.0,
+                                  zoom_in_duration=0.3,
+                                  zoom_hold_duration=1.4,  # 1.7 - 0.3
+                                  zoom_out_speed=0.95):
+    """Experimental version of zoom effect with improved behavior
+    
+    Args:
+        frame: The video frame to process
+        current_time: Current time in the video
+        mouse_positions: Dict of mouse positions
+        click_events: Dict of click events
+        zoom_factor: How much to zoom in (1.25 = 25% zoom)
+        zoom_window: Total duration of zoom effect
+        zoom_in_duration: How long to spend zooming in
+        zoom_hold_duration: How long to hold the zoom
+        zoom_out_speed: Speed of zoom out (0.95 = 5% per frame)
+    """
     h, w = frame.shape[:2]
     
     # Initialize static variables
@@ -637,13 +653,13 @@ def create_zoom_effect_experimental(frame, current_time, mouse_positions, click_
             create_zoom_effect_experimental.is_zooming_out = False
             create_zoom_effect_experimental.zoom_center = (frame_x, frame_y)
     else:
-        if time_since_click < 0.3:  # Quick zoom in
-            zoom_progress = time_since_click / 0.3
+        if time_since_click < zoom_in_duration:  # Quick zoom in
+            zoom_progress = time_since_click / zoom_in_duration
             create_zoom_effect_experimental.current_zoom = 1.0 + (zoom_factor - 1.0) * zoom_progress
-        elif time_since_click < 1.7:  # Hold zoom
+        elif time_since_click < (zoom_in_duration + zoom_hold_duration):  # Hold zoom
             create_zoom_effect_experimental.current_zoom = zoom_factor
         else:  # Auto zoom out
-            create_zoom_effect_experimental.current_zoom = max(1.0, create_zoom_effect_experimental.current_zoom * 0.95)
+            create_zoom_effect_experimental.current_zoom = max(1.0, create_zoom_effect_experimental.current_zoom * zoom_out_speed)
     
     # Apply zoom if needed
     if create_zoom_effect_experimental.current_zoom > 1.01 and create_zoom_effect_experimental.zoom_center:
@@ -726,7 +742,10 @@ def process_video(input_video, mouse_data, output_video=None, zoom_factor=1.25,
                 mouse_positions,
                 click_events,
                 zoom_factor=zoom_factor,
-                zoom_window=zoom_window
+                zoom_window=zoom_window,
+                zoom_in_duration=0.3,
+                zoom_hold_duration=4.0,
+                zoom_out_speed=0.95
             )
             
             # Write frame
